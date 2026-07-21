@@ -1,0 +1,45 @@
+version: "3"
+
+vars:
+  MODULE: github.com/RedditUclaista/mail-service
+  BIN_DIR: bin
+  GOOS: linux
+  GOARCH: amd64
+
+tasks:
+  default:
+    desc: "Default task: Builds the project"
+    cmds:
+      - task: build
+
+  setup:
+    desc: "Installs dependencies"
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  dev:
+    desc: "Starts the mail service with Hot Reload"
+    cmds:
+      - air -c .air.toml
+
+  build:
+    desc: "Builds static binaries for Linux"
+    cmds:
+      - echo "Building Mail Service..."
+      - CGO_ENABLED=0 GOOS={{.GOOS}} go build -o {{.BIN_DIR}}/mail-service ./cmd/main.go
+    sources:
+      - "**/*.go"
+      - "templates/*.html"
+      - "go.mod"
+
+  lint:
+    desc: "Runs static code analysis (Linter)"
+    cmds:
+      - golangci-lint run ./...
+
+  test-event:
+    desc: "Publishes a test OTP event to LavinMQ to test mail-service"
+    cmds:
+      - go run ./cmd/test-publish {{.CLI_ARGS}}
+
