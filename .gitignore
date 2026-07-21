@@ -1,0 +1,9 @@
+tmp/
+.vscode/
+.idea/
+bin/
+.task/
+.env
+!.env.example
+.direnv/
+AGENT.md
