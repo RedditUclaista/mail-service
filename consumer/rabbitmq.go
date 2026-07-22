@@ -16,10 +16,15 @@ type OTPEventData struct {
 }
 
 type EventPayload struct {
+	// Format 1: Direct JSON payload
 	EventType      string       `json:"event_type"`
 	RecipientEmail string       `json:"recipient_email"`
 	RecipientName  string       `json:"recipient_name"`
 	Data           OTPEventData `json:"data"`
+
+	// Format 2: Outbox relay payload from auth-service
+	Email   string `json:"email"`
+	OTPCode string `json:"otp_code"`
 }
 
 type RabbitConsumer struct {
@@ -52,26 +57,8 @@ func (c *RabbitConsumer) Start() {
 			continue
 		}
 
-		exchangeName := "nexus_events"
 		queueName := "email_queue"
-
-		// Declare topic exchange
-		err = ch.ExchangeDeclare(
-			exchangeName, // name
-			"topic",      // type
-			true,         // durable
-			false,        // auto-deleted
-			false,        // internal
-			false,        // no-wait
-			nil,          // arguments
-		)
-		if err != nil {
-			log.Printf("Failed to declare exchange %s: %v", exchangeName, err)
-			ch.Close()
-			conn.Close()
-			time.Sleep(5 * time.Second)
-			continue
-		}
+		exchanges := []string{"nexus_events", "topic"}
 
 		// Declare queue
 		q, err := ch.QueueDeclare(
@@ -90,18 +77,33 @@ func (c *RabbitConsumer) Start() {
 			continue
 		}
 
-		// Bind queue to topic exchange
-		routingKeys := []string{"USER_OTP_GENERATED", "email.#", "#"}
-		for _, key := range routingKeys {
-			err = ch.QueueBind(
-				q.Name,       // queue name
-				key,          // routing key
-				exchangeName, // exchange
-				false,
-				nil,
+		// Declare and bind exchanges
+		routingKeys := []string{"USER_OTP_GENERATED", "core.otp.request", "email.#", "#"}
+		for _, exName := range exchanges {
+			err = ch.ExchangeDeclare(
+				exName, // name
+				"topic", // type
+				true,    // durable
+				false,   // auto-deleted
+				false,   // internal
+				false,   // no-wait
+				nil,     // arguments
 			)
 			if err != nil {
-				log.Printf("Failed to bind queue with routing key %s: %v", key, err)
+				log.Printf("Warning: Exchange %s declare: %v", exName, err)
+			}
+
+			for _, key := range routingKeys {
+				err = ch.QueueBind(
+					q.Name, // queue name
+					key,    // routing key
+					exName, // exchange
+					false,
+					nil,
+				)
+				if err != nil {
+					log.Printf("Failed to bind queue %s to exchange %s with key %s: %v", q.Name, exName, key, err)
+				}
 			}
 		}
 
@@ -115,14 +117,14 @@ func (c *RabbitConsumer) Start() {
 			nil,    // args
 		)
 		if err != nil {
-			log.Printf("Failed to register a consumer: %v", err)
+			log.Printf("Failed to register consumer: %v", err)
 			ch.Close()
 			conn.Close()
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		log.Printf("[*] Mail Service connected to LavinMQ. Listening on queue '%s' (Exchange: %s)...", q.Name, exchangeName)
+		log.Printf("[*] Mail Service connected to LavinMQ. Listening on queue '%s'...", q.Name)
 
 		notifyClose := conn.NotifyClose(make(chan *amqp.Error))
 
@@ -154,28 +156,50 @@ func (c *RabbitConsumer) handleDelivery(d amqp.Delivery) {
 	var payload EventPayload
 	if err := json.Unmarshal(d.Body, &payload); err != nil {
 		log.Printf("Error unmarshaling event payload: %v", err)
-		_ = d.Nack(false, false) // Reject invalid message
+		_ = d.Nack(false, false)
 		return
 	}
 
-	switch payload.EventType {
-	case "USER_OTP_GENERATED":
+	// Extract email and OTP code from either format
+	recipientEmail := payload.RecipientEmail
+	if recipientEmail == "" {
+		recipientEmail = payload.Email
+	}
+
+	recipientName := payload.RecipientName
+	if recipientName == "" {
+		recipientName = "Usuario Nexus"
+	}
+
+	otpCode := payload.Data.OTPCode
+	if otpCode == "" {
+		otpCode = payload.OTPCode
+	}
+
+	expirationMinutes := payload.Data.ExpirationMinutes
+	if expirationMinutes == 0 {
+		expirationMinutes = 5
+	}
+
+	// If it's an OTP request or contains OTP code
+	if otpCode != "" && recipientEmail != "" {
 		err := c.mailer.SendOTPEmail(
-			payload.RecipientEmail,
-			payload.RecipientName,
-			payload.Data.OTPCode,
-			payload.Data.ExpirationMinutes,
+			recipientEmail,
+			recipientName,
+			otpCode,
+			expirationMinutes,
 		)
 		if err != nil {
-			log.Printf("Failed to send OTP email to %s: %v", payload.RecipientEmail, err)
-			_ = d.Nack(false, true) // Requeue for retry
+			log.Printf("Failed to send OTP email to %s: %v", recipientEmail, err)
+			time.Sleep(5 * time.Second)
+			_ = d.Nack(false, true)
 			return
 		}
-		log.Printf("Successfully processed and sent OTP email to %s", payload.RecipientEmail)
+		log.Printf("Successfully processed and sent OTP email to %s (Code: %s)", recipientEmail, otpCode)
 		_ = d.Ack(false)
-
-	default:
-		log.Printf("Received non-OTP event type (%s), acknowledging and ignoring.", payload.EventType)
-		_ = d.Ack(false)
+		return
 	}
+
+	log.Printf("Acknowledged non-OTP message [RoutingKey: %s]", d.RoutingKey)
+	_ = d.Ack(false)
 }
