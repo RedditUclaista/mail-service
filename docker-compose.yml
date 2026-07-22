@@ -1,0 +1,14 @@
+services:
+  app:
+    container_name: nexus_mail_service
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - lab3_shared_network
+
+networks:
+  lab3_shared_network:
+    external: true
